@@ -1,5 +1,6 @@
 import argparse
 import numpy as np
+import os
 import time
 import torch
 import torch.nn as nn
@@ -11,21 +12,34 @@ from neuralnet import Discriminator, Generator
 from timeit import default_timer as timer
 from torch.utils.tensorboard import SummaryWriter
 
+
+EXPERIMENT_ID = int(time.time()) # used to create new directories to save results of individual experiments
+# directories to save resulst of experiments
+DEFAULT_IMG_DIR = 'images/{}'.format(EXPERIMENT_ID)
+DEFAULT_TENSORBOARD_DIR = 'tensorboard/{}'.format(EXPERIMENT_ID)
+
+# this will vary in the ProGAN
+IMG_SIZE = 128
+
 real_label = 1.0 # for images in training set
 fake_label = 0.0 # for generated images
 
 # allow program to be run with different arguments; no arguments -> use defaults
 parser = argparse.ArgumentParser()
-parser.add_argument('--data_dir', default='data/celeba/img_align_celeba')
+parser.add_argument('--data_dir', default='/home/datasets/celeba-aligned')
 parser.add_argument('--discriminator_model_path')
 parser.add_argument('--generator_model_path')
 parser.add_argument('--learning_rate', default=0.0002, type=float)
 parser.add_argument('--mini_batch_size', default=256, type=int)
 parser.add_argument('--num_epochs', default=200, type=int)
-parser.add_argument('--save_image_dir', default='images')
+parser.add_argument('--save_image_dir', default=DEFAULT_IMG_DIR)
 parser.add_argument('--save_model_dir', default='models')
-parser.add_argument('--tensorboard_dir', default='tensorboard/gan')
+parser.add_argument('--tensorboard_dir', default=DEFAULT_TENSORBOARD_DIR)
 args = parser.parse_args()
+
+# create directories for images and tensorboard results
+os.mkdir('/home/ioanalazar459/celebGAN/{}'.format(args.save_image_dir))
+os.mkdir('/home/ioanalazar459/celebGAN/{}'.format(args.tensorboard_dir))
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -140,7 +154,7 @@ for epoch in range(args.num_epochs):
 
     with torch.no_grad():
         generated_images = g_model(fixed_noise).detach()
-    torchvision.utils.save_image(generated_images, '{}/{}.jpg'.format(args.save_image_dir, epoch), padding=2, normalize=True)
+    torchvision.utils.save_image(generated_images, '{}/{}-{}x{}.jpg'.format(args.save_image_dir, epoch, IMG_SIZE, IMG_SIZE), padding=2, normalize=True)
 
 time_elapsed_training = timer() - start_time_training
 print('Finished training!')

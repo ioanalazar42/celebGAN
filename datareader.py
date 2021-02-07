@@ -3,6 +3,7 @@ import numpy as np
 import os
 
 from skimage import io, transform
+from timeit import default_timer as timer
 
 def _center_crop_image(image):
     height = image.shape[0]
@@ -34,17 +35,24 @@ def _load_image(path):
     return image.transpose(2, 0, 1)
 
 def load_images(dir_path):
+    pre_load_time = timer()
     file_names = os.listdir(dir_path)
-    file_names = file_names[:10000] # load 10000 images
+    file_names = file_names[:5000] # load images
     images = np.empty([len(file_names), 3, 128, 128], dtype=np.float32)
+    print('Initial instructions took: {:.3f}s'.format(timer() - pre_load_time))
     print('Loading {} images from {}...'.format(len(file_names), dir_path))
 
+    current_time = timer() 
+    total_load_time = 0
     for i, file_name in enumerate(file_names):
         image_path = os.path.join(dir_path, file_name)
         images[i] = _load_image(image_path)
 
         if i > 0 and i % 500 == 0:
             # give report every 500 loaded images
-            print('Loaded {}/{} images'.format(i, len(images)))
-
+            loaded_500 = timer() - current_time
+            current_time = timer()
+            total_load_time += loaded_500
+            print('[{:.3f}]\t Loaded {}/{} images'.format(loaded_500, i, len(images)))
+    print('Total load time: {:.3f}s'.format(total_load_time))
     return images
