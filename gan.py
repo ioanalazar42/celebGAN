@@ -1,170 +1,185 @@
 import argparse
 import numpy as np
 import os
+import shutil
 import time
 import torch
-import torch.nn as nn
 import torch.optim as optim
 import torchvision
 
 from datareader import load_images
-from neuralnet import Discriminator, Generator
+from network import Discriminator, Generator
 from timeit import default_timer as timer
 from torch.utils.tensorboard import SummaryWriter
 
 
-EXPERIMENT_ID = int(time.time()) # used to create new directories to save results of individual experiments
-# directories to save resulst of experiments
-DEFAULT_IMG_DIR = 'images/{}'.format(EXPERIMENT_ID)
-DEFAULT_TENSORBOARD_DIR = 'tensorboard/{}'.format(EXPERIMENT_ID)
-
-# this will vary in the ProGAN
+# Define constants.
+EXPERIMENT_ID = int(time.time()) # Used to create new directories to save results of individual experiments.
 IMG_SIZE = 128
+EPSILON = 1e-7
 
-real_label = 1.0 # for images in training set
-fake_label = 0.0 # for generated images
+EXPERIMENT_DIR = f'experiments/{EXPERIMENT_ID}'
+SAVE_IMAGE_DIR = f'{EXPERIMENT_DIR}/images'
+TENSORBOARD_DIR = f'{EXPERIMENT_DIR}/tensorboard'
+LIVE_TENSORBOARD_DIR = f'{TENSORBOARD_DIR}/live' # Stores the latest version of tensorboard data.
+SAVE_MODEL_DIR = f'{EXPERIMENT_DIR}/models'
 
-# allow program to be run with different arguments; no arguments -> use defaults
-parser = argparse.ArgumentParser()
-parser.add_argument('--data_dir', default='/home/datasets/celeba-aligned')
-parser.add_argument('--discriminator_model_path')
-parser.add_argument('--generator_model_path')
-parser.add_argument('--learning_rate', default=0.0002, type=float)
-parser.add_argument('--mini_batch_size', default=256, type=int)
-parser.add_argument('--num_epochs', default=200, type=int)
-parser.add_argument('--save_image_dir', default=DEFAULT_IMG_DIR)
-parser.add_argument('--save_model_dir', default='models')
-parser.add_argument('--tensorboard_dir', default=DEFAULT_TENSORBOARD_DIR)
-args = parser.parse_args()
+PARSER = argparse.ArgumentParser()
 
-# create directories for images and tensorboard results
-os.mkdir('/home/ioanalazar459/celebGAN/{}'.format(args.save_image_dir))
-os.mkdir('/home/ioanalazar459/celebGAN/{}'.format(args.tensorboard_dir))
+PARSER.add_argument('--data_dir', default='/home/datasets/celeba-aligned/original')
+PARSER.add_argument('--load_discriminator_model_path')
+PARSER.add_argument('--load_generator_model_path')
+PARSER.add_argument('--save_image_dir', default=SAVE_IMAGE_DIR)
+PARSER.add_argument('--save_model_dir', default=SAVE_MODEL_DIR)
+PARSER.add_argument('--tensorboard_dir', default=LIVE_TENSORBOARD_DIR)
+PARSER.add_argument('--dry_run', default=False, type=bool)
+PARSER.add_argument('--model_save_frequency', default=15, type=int)
+PARSER.add_argument('--image_save_frequency', default=100, type=int)
+PARSER.add_argument('--training_set_size', default=99999999, type=int)
+PARSER.add_argument('--epoch_length', default=100, type=int)
+PARSER.add_argument('--learning_rate', default=0.0001, type=float)
+PARSER.add_argument('--mini_batch_size', default=256, type=int)
+PARSER.add_argument('--num_epochs', default=200, type=int)
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+args = PARSER.parse_args()
 
-# set up GAN
-d_model = Discriminator().to(device) # discriminator
-g_model = Generator().to(device)     # generator
+# Create directories for images, tensorboard results and saved models.
+if not args.dry_run:
+    if not os.path.exists(EXPERIMENT_DIR):
+        os.makedirs(EXPERIMENT_DIR) # Set up root experiment directory.
+    os.makedirs(args.save_image_dir)
+    os.makedirs(args.tensorboard_dir)
+    os.makedirs(args.save_model_dir)
+    WRITER = SummaryWriter(args.tensorboard_dir) # Set up TensorBoard.
+else:
+    print('Dry run! Just for testing, data is not saved')
 
-# load pre-trained discriminator if a path to a model is given
-if args.discriminator_model_path:
-    d_model.load_state_dict(torch.load(args.discriminator_model_path))
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# load pre-trained generator if a path to a model is given
-if args.generator_model_path:
-    g_model.load_state_dict(torch.load(args.generator_model_path))
+# Set up the GAN.
+discriminator_model = Discriminator().to(DEVICE)
+generator_model = Generator().to(DEVICE)
 
-# optimizer for discriminator and generator is Adam optimizer
-d_optim = optim.Adam(d_model.parameters(), lr=args.learning_rate)
-g_optim = optim.Adam(g_model.parameters(), lr=args.learning_rate)
+# Load pre-trained models if they are provided.
+if args.load_discriminator_model_path:
+    discriminator_model.load_state_dict(torch.load(args.load_discriminator_model_path))
 
-# binary cross-entropy loss
-criterion = nn.BCELoss()
+if args.load_generator_model_path:
+    generator_model.load_state_dict(torch.load(args.load_generator_model_path))
 
-# batch of latent vectors
-fixed_noise = torch.randn(64, 512, 1, 1, device=device)
+# Set up Adam optimizers for both models.
+discriminator_optimizer = optim.Adam(discriminator_model.parameters(), lr=args.learning_rate, betas=(0, 0.9))
+generator_optimizer = optim.Adam(generator_model.parameters(), lr=args.learning_rate, betas=(0, 0.9))
 
-images = load_images(args.data_dir)
+# Create a random batch of latent space vectors that will be used to visualize the progression of the generator.
+fixed_latent_space_vectors = torch.randn(64, 512, 1, 1, device=DEVICE)
 
-# set up TensorBoard
-writer = SummaryWriter(args.tensorboard_dir)
-writer.add_graph(d_model, torch.tensor(images[:1], device=device))
-writer.add_graph(g_model, fixed_noise)
+# Load and preprocess images.
+images = load_images(args.data_dir, args.training_set_size)
 
-print('Start training...')
-start_time_training = timer()
+# Add network architectures for Discriminator and Generator to TensorBoard.
+if not args.dry_run:
+    WRITER.add_graph(discriminator_model, torch.tensor(images[:1], device=DEVICE))
+    WRITER.add_graph(generator_model, fixed_latent_space_vectors)
+
+total_training_steps = 0
+
 for epoch in range(args.num_epochs):
-    start_time_epoch = timer()
-
-    average_discriminator_real_performance = 0.0 # D(x) -- accuracy of D when given real examples x
-    average_discriminator_generated_performance = 0.0 # D(G(x)) -- accuracy of D given generated (fake) examples G(x)
+    start_time = timer()
+    
+    # Variables for recording statistics.
+    average_discriminator_real_performance = 0.0
+    average_discriminator_generated_performance = 0.0 
     average_discriminator_loss = 0.0
     average_generator_loss = 0.0
 
-    for i in range(100):
-        # 1) Discriminator training step
-        d_model.zero_grad()
+    # Train: perform 'args.epoch_length' mini-batch updates per "epoch".
+    for i in range(args.epoch_length):
+        total_training_steps += 1
 
-        # 1.1) Train with mini-batch of real examples
+        # Train the discriminator:
+        discriminator_model.zero_grad()
+
+        # Evaluate a mini-batch of real images.
         random_indexes = np.random.choice(len(images), args.mini_batch_size)
-        mini_batch = torch.tensor(images[random_indexes], device=device)
-        mini_batch_labels = torch.full((args.mini_batch_size,), real_label, dtype=torch.float, device=device)
+        real_images = torch.tensor(images[random_indexes], device=DEVICE)
 
-        # Forward pass
-        outputs = d_model(mini_batch)
-        loss = criterion(outputs, mini_batch_labels)
+        real_predictions = discriminator_model(real_images)
 
-        # Backward pass - gradients and loss of D for real examples
+        # Evaluate a mini-batch of generated images.
+        random_latent_space_vectors = torch.randn(args.mini_batch_size, 512, 1, 1, device=DEVICE)
+        generated_images = generator_model(random_latent_space_vectors)
+
+        generated_predictions = discriminator_model(generated_images.detach())
+
+        # Update the weights.
+        loss = -torch.mean(torch.log(EPSILON + real_predictions) + torch.log(EPSILON + 1 - generated_predictions))
         loss.backward()
+        discriminator_optimizer.step()
 
-        # Record some stats
-        average_discriminator_loss += loss.item()
-        average_discriminator_real_performance += outputs.mean().item() # TODO: understand this
+        # Record some statistics.
+        average_discriminator_loss += loss.item() / args.epoch_length
+        average_discriminator_real_performance += real_predictions.mean().item() / args.epoch_length
+        average_discriminator_generated_performance += generated_predictions.mean().item() / args.epoch_length
 
-        # 1.2) Train with mini-batch of generated (fake) examples
-        noise = torch.randn(args.mini_batch_size, 512, 1, 1, device = device)
-        mini_batch = g_model(noise) # output: mini_batch_size x (3 x 128 x 128)
-        mini_batch_labels.fill_(fake_label) # fills tensor with specified value
+        # Train the generator:
+        generator_model.zero_grad()
+        generated_predictions = discriminator_model(generated_images)
 
-        # Forward pass
-        # size of outputs: mini_batch_size x 1
-        outputs = d_model(mini_batch.detach()) # TODO: Why detach?
-        loss = criterion(outputs, mini_batch_labels)
-
-        # Backward pass - gradients and loss of D for fake examples
+        # Update the weights.
+        loss = -torch.mean(torch.log(EPSILON + generated_predictions))
         loss.backward()
+        generator_optimizer.step()
 
-        d_optim.step()
+        # Record some statistics.
+        average_generator_loss += loss.item() / args.epoch_length
 
-        # Record some stats
-        average_discriminator_loss += loss.item()
-        average_discriminator_generated_performance += outputs.mean().item()
+        # Save generated images every 'image_save_frequency' training steps. If 'image_save_frequency' == 'epoch_length', images saved every epoch.
+        if (not args.dry_run and total_training_steps % args.image_save_frequency == 0):
 
-        # 2) Generator training step
-        g_model.zero_grad()
-        mini_batch_labels.fill_(real_label)
+            # Save generated images.
+            with torch.no_grad():
+                generated_images = generator_model(fixed_latent_space_vectors).detach()
+            torchvision.utils.save_image(generated_images, f'{args.save_image_dir}/{total_training_steps:03d}-{IMG_SIZE}x{IMG_SIZE}-{epoch}.jpg', padding=2, normalize=True)
+            
+            # Create a grid of generated images to save to Tensorboard.
+            grid_images = torchvision.utils.make_grid(generated_images, padding=2, normalize=True)
 
-        # Forward pass
-        outputs = d_model(mini_batch)
-        loss = criterion(outputs, mini_batch_labels)
+    # Record time elapsed for current epoch.
+    time_elapsed = timer() - start_time
 
-        # Backward pass
-        loss.backward()
-        g_optim.step()
+    # Print some statistics.
+    print(f'{epoch:3} | '
+          f'Loss(D): {average_discriminator_loss:.6f} | '
+          f'Loss(G): {average_generator_loss:.6f} | '
+          f'Avg D(x): {average_discriminator_real_performance:.6f} | '
+          f'Avg D(G(x)): {average_discriminator_generated_performance:.6f} | '
+          f'Time: {time_elapsed:.3f}s')
+    
+    # Save model parameters, tensorboard data, generated images.
+    if (not args.dry_run):
 
-        # Record some stats
-        average_generator_loss += loss.item()
+        # Save tensorboard data.
+        WRITER.add_image('training/generated-images', grid_images, epoch)
+        WRITER.add_scalar('training/generator/loss', average_generator_loss, epoch)
+        WRITER.add_scalar('training/discriminator/loss', average_discriminator_loss, epoch)
+        WRITER.add_scalar('training/discriminator/real-performance', average_discriminator_real_performance, epoch)
+        WRITER.add_scalar('training/discriminator/generated-performance', average_discriminator_generated_performance, epoch)
+        WRITER.add_scalar('training/epoch-duration', time_elapsed, epoch)
 
-    time_elapsed_epoch = timer() - start_time_epoch
+        # Save the model parameters at a specified interval.
+        if (epoch > 0 and (epoch % args.model_save_frequency == 0
+            or epoch == args.num_epochs - 1)):
 
-    average_discriminator_loss /= 100
-    average_generator_loss /= 100
-    average_discriminator_real_performance /= 100
-    average_discriminator_generated_performance /= 100
+            # Create a backup of tensorboard data each time model is saved.
+            shutil.copytree(LIVE_TENSORBOARD_DIR, f'{TENSORBOARD_DIR}/{epoch:03d}')
 
-    print(('Epoch {} - Discriminator Loss: {:.6f} - Generator Loss: {:.6f} - Average D(x): {:.6f} - Average D(G(x)): {:.6f} - Time: {:.3f}s')
-        .format(epoch, average_discriminator_loss, average_generator_loss, average_discriminator_real_performance, average_discriminator_generated_performance, time_elapsed_epoch))
+            save_discriminator_model_path = f'{args.save_model_dir}/discriminator_{EXPERIMENT_ID}-{epoch}.pth'
+            print(f'\nSaving discriminator model as "{save_discriminator_model_path}"...')
+            torch.save(discriminator_model.state_dict(), save_discriminator_model_path)
+        
+            save_generator_model_path = f'{args.save_model_dir}/generator_{EXPERIMENT_ID}-{epoch}.pth'
+            print(f'Saving generator model as "{save_generator_model_path}"...\n')
+            torch.save(generator_model.state_dict(), save_generator_model_path)
 
-    writer.add_scalar('training/generator/loss', average_generator_loss, epoch)
-    writer.add_scalar('training/discriminator/loss', average_discriminator_loss, epoch)
-    writer.add_scalar('training/discriminator/real_performance', average_discriminator_real_performance, epoch)
-    writer.add_scalar('training/discriminator/generated_performance', average_discriminator_generated_performance, epoch)
-    writer.add_scalar('training/epoch_duration', time_elapsed_epoch, epoch)
-
-    with torch.no_grad():
-        generated_images = g_model(fixed_noise).detach()
-    torchvision.utils.save_image(generated_images, '{}/{}-{}x{}.jpg'.format(args.save_image_dir, epoch, IMG_SIZE, IMG_SIZE), padding=2, normalize=True)
-
-time_elapsed_training = timer() - start_time_training
 print('Finished training!')
-
-save_d_model_path = '{}/discriminator_{}.pth'.format(args.save_model_dir, time.time())
-print('Saving discriminator model as "{}"...'.format(save_d_model_path))
-torch.save(d_model.state_dict(), save_d_model_path)
-
-save_g_model_path = '{}/generator_{}.pth'.format(args.save_model_dir, time.time())
-print('Saving generator model as "{}"...'.format(save_g_model_path))
-torch.save(g_model.state_dict(), save_g_model_path)
-
-print('Saved models.')

@@ -1,4 +1,4 @@
-'''Architecture of GAN Discriminator and Generator'''
+'''Architecture of GAN Discriminator and Generator.'''
 
 import torch
 import torch.nn as nn
